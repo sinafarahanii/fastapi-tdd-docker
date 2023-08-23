@@ -1,3 +1,8 @@
 fastapi
 uvicorn
 pydantic-settings
+asyncpg
+tortoise-orm
+aerich
+pytest
+httpx
