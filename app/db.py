@@ -1,44 +1,24 @@
 import logging
 import os
 from fastapi import FastAPI
-from tortoise import Tortoise, run_async
-from tortoise.contrib.fastapi import register_tortoise
-
+from sqlalchemy import create_engine
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
 
 log = logging.getLogger("uvicorn")
-
-TORTOISE_ORM = {
-    "connections": {"default": os.environ.get("DATABASE_URL")},
-    "apps": {
-        "models": {
-            "models": ["app.models.tortoise", "aerich.models"],
-            "default_connection": "default",
-        },
-    },
-}
+"""""
+SessionLocal = None
+Base = None
+engine = None
 
 
-def init_db(app: FastAPI) -> None:
-    register_tortoise(
-        app,
-        db_url=os.environ.get("DATABASE_URL"),
-        modules={"models": ["app.models.tortoise"]},
-        generate_schemas=False,
-        add_exception_handlers=True,
-    )
+def init_db(app: FastAPI):
+    database_url = os.environ.get("DATABASE_URL_TEST")
+    print(database_url)
+    engine = create_engine(database_url)
 
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-async def generate_schema() -> None:
-    log.info("Initializing Tortoise...")
+    Base = declarative_base()
+"""
 
-    await Tortoise.init(
-        db_url=os.environ.get("DATABASE_URL"),
-        modules={"models": ["models.tortoise"]},
-    )
-    log.info("Generating database schema via Tortoise...")
-    await Tortoise.generate_schemas()
-    await Tortoise.close_connections()
-
-
-if __name__ == "__main__":
-    run_async(generate_schema())
