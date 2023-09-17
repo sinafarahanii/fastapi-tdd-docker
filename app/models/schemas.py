@@ -23,6 +23,7 @@ class Day(str, enum.Enum):
 
 class Shift(BaseModel):
     id: uuid.UUID
+    name: str
     days: Optional[list[Day]]
     type: Type
     date: Optional[date]
@@ -34,6 +35,7 @@ class Shift(BaseModel):
 
 
 class ShiftType1(BaseModel):
+    name: str
     start: time = Field(default="09:00")
     end: time = Field(default="18:00")
     flex_time: time = Field(default="00:00")
@@ -47,6 +49,7 @@ class ShiftType1Output(ShiftType1):
 
 
 class ShiftType2(BaseModel):
+    name: str
     start: time = Field(default="09:00")
     end: time = Field(default="18:00")
     flex_time: time = Field(default="00:00")
@@ -67,7 +70,8 @@ class Log(BaseModel):
 
 class LogOutput(Log):
     id: UUID
-    is_approved: bool
+    is_overtime: bool
+    approved_overtime: time
 
 
 class Event(BaseModel):

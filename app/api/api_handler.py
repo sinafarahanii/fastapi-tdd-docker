@@ -3,14 +3,16 @@ from humanfriendly import format_timespan
 import uuid
 from typing import List, Annotated
 from sqlalchemy.orm import Session
-# from app.db import SessionLocal, engine
+from app.db import SessionLocal, engine
 from fastapi import APIRouter, Path, Query, Request, middleware, HTTPException, Body, Depends
+from app.models import models
 from fastapi.responses import RedirectResponse
 from app.models.schemas import Shift, User, Type, Day, Holiday, Log, LogOutput, ShiftType1, ShiftType2, DailyWork, ShiftType1Output, ShiftType2Output, Event, EventOutput
 from datetime import date, time, timedelta
 from ortools.sat.python import cp_model
 import pandas
 
+models.Base.metadata.create_all(bind=engine)
 router = APIRouter()
 
 events = []
@@ -19,35 +21,40 @@ users = [
      User(id=uuid.uuid4(), shifts=[], entry_logs=[], exit_logs=[])
 ]
 
-shifts = [Shift(type="1", start="09:00", end="18:00", flex_time="01:00", days=[Day.MONDAY, Day.TUESDAY, Day.WEDNESDAY, Day.THURSDAY, Day.FRIDAY, Day.SATURDAY, Day.SUNDAY], id=uuid.uuid4(), date=None, permit_time="04:00"),
-          Shift(type="2", start="12:00", end="15:00", flex_time="00:30", days=None, id=uuid.uuid4(), date="2023-10-10", permit_time="04:00"),
-          Shift(type="2", start="13:00", end="16:00", flex_time="00:30", days=None, id=uuid.uuid4(), date="2023-10-10", permit_time="04:00"),
-          Shift(type="1", start="11:00", end="19:00", flex_time="01:00", days=[Day.MONDAY, Day.TUESDAY, Day.WEDNESDAY], id=uuid.uuid4(), date=None, permit_time="04:00")]
+shifts = [Shift(name="shift", type="1", start="09:00", end="18:00", flex_time="01:00", days=[Day.MONDAY, Day.TUESDAY, Day.WEDNESDAY, Day.THURSDAY, Day.FRIDAY, Day.SATURDAY, Day.SUNDAY], id=uuid.uuid4(), date=None, permit_time="04:00"),
+          Shift(name="shift", type="2", start="12:00", end="15:00", flex_time="00:30", days=None, id=uuid.uuid4(), date="2023-10-10", permit_time="04:00"),
+          Shift(name="shift", type="2", start="13:00", end="16:00", flex_time="00:30", days=None, id=uuid.uuid4(), date="2023-10-10", permit_time="04:00"),
+          Shift(name="shift", type="1", start="11:00", end="19:00", flex_time="01:00", days=[Day.MONDAY, Day.TUESDAY, Day.WEDNESDAY], id=uuid.uuid4(), date=None, permit_time="04:00")]
 
 holidays = []
 
-"""""
+
 def get_db():
     db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
-"""""
 
 
 @router.post("/holidays", response_model=List[Holiday], tags=["Holidays"], status_code=201)
-async def create_holidays(holiday_list: List[Holiday]):
+async def create_holidays(holiday_list: List[Holiday], db: Session = Depends(get_db)):
+    holiday_list = db.query(models.Holiday).all()
+    """""
     for holiday in holidays:
         if holiday_list.__contains__(holiday.date):
             holiday_list.remove(holiday)
+    """""
     for h in holiday_list:
-        holidays.append(h)
+        holiday = models.Holiday(date=h.date, name=h.name)
+        db.add(holiday)
+        db.commit()
+        db.refresh(holiday)
     return holiday_list
 
 
 @router.get("/holidays", response_model=list[Holiday], tags=["Holidays"])
-async def get_holidays(start: date = Query(None, title="start date"), end: date = Query(None, title="end date")):
+async def get_holidays(start: date = Query(None, title="start date"), end: date = Query(None, title="end date"), db: Session = Depends(get_db)):
     if start is None and end is None:
         raise HTTPException(status_code=400, detail="No parameter provided!")
     if start is None:
@@ -57,34 +64,38 @@ async def get_holidays(start: date = Query(None, title="start date"), end: date 
     if end < start:
         raise HTTPException(status_code=422, detail="End date can't be before start date!")
     output_holidays = []
-
+    holidays = db.query(models.Holiday).all()
     for holiday in holidays:
         if holiday.date >= start <= end:
             output_holidays.append(holiday)
     return output_holidays
 
 
-@router.delete("/holidays", response_model=list[Holiday], tags=["Holidays"])
-async def delete_holidays(date: date):
-    removed_holidays = []
-    print(date)
-    for holiday in holidays:
+@router.delete("/holidays", response_model=Holiday, tags=["Holidays"])
+async def delete_holidays(date: date, db: Session = Depends(get_db)):
+
+    holiday_list = db.query(models.Holiday).all()
+    for holiday in holiday_list:
         if date == holiday.date:
-            holidays.remove(holiday)
-            return removed_holidays
+            db.delete(holiday)
+            db.commit()
+            db.refresh(holiday)
+            return holiday
     raise HTTPException(status_code=404, detail="There is no holiday on these dates!")
 
 
 @router.put("/holidays", response_model=Holiday, tags=["Holidays"])
-async def update_holiday(holiday_date: date, new_date: date = Query(None), new_name: str = Query(None)):
+async def update_holiday(holiday_date: date, new_date: date = Query(None), new_name: str = Query(None),  db: Session = Depends(get_db)):
     if not new_date and not new_name:
         raise HTTPException(status_code=400, detail="You most provide information!")
+    holidays = db.query(models.Holiday).all()
+    target_holiday = db.query(models.Holiday).filter(models.Holiday.date == holiday_date).first()
     for holiday in holidays:
         if holiday.date == holiday_date:
             if new_name is not None:
-                holiday.name = new_name
+                target_holiday.name = new_name
             if new_date is not None:
-                holiday.date = new_date
+                target_holiday.date = new_date
             return holiday
     raise HTTPException(status_code=404, detail="There is no holiday on this date!")
 
@@ -198,8 +209,8 @@ async def create_shift_type1(shift: ShiftType1):
     if shift.end < shift.start:
         raise HTTPException(status_code=422, detail="end time can't be before start time")
     id = uuid.uuid4()
-    pending_shift = Shift(days=shift.days, type=Type.one, start=shift.start, flex_time=shift.flex_time, permit_time=shift.permit_time, end=shift.end, date=None, id=id)
-    output_shift = ShiftType1Output(days=shift.days, type=Type.one, start=shift.start, flex_time=shift.flex_time, permit_time=shift.permit_time, end=shift.end, id=id)
+    pending_shift = Shift(name=shift.name, days=shift.days, type=Type.one, start=shift.start, flex_time=shift.flex_time, permit_time=shift.permit_time, end=shift.end, date=None, id=id)
+    output_shift = ShiftType1Output(name=shift, days=shift.days, type=Type.one, start=shift.start, flex_time=shift.flex_time, permit_time=shift.permit_time, end=shift.end, id=id)
     shifts.append(pending_shift)
     return output_shift
 
@@ -211,8 +222,8 @@ async def create_shift_type2(shift: ShiftType2):
     if shift.end < shift.start:
         raise HTTPException(status_code=422, detail="end time can't be before start time")
     id = uuid.uuid4()
-    pending_shift = Shift(days=None, type=Type.two, start=shift.start, flex_time=shift.flex_time,  permit_time=shift.permit_time, end=shift.end, date=shift.date, id=id)
-    output_shift = ShiftType2Output(date=shift.date, type=Type.one, start=shift.start, flex_time=shift.flex_time, permit_time=shift.permit_time, end=shift.end, id=id)
+    pending_shift = Shift(name=shift.name, days=None, type=Type.two, start=shift.start, flex_time=shift.flex_time,  permit_time=shift.permit_time, end=shift.end, date=shift.date, id=id)
+    output_shift = ShiftType2Output(name=shift.name, date=shift.date, type=Type.one, start=shift.start, flex_time=shift.flex_time, permit_time=shift.permit_time, end=shift.end, id=id)
     shifts.append(pending_shift)
     return output_shift
 
@@ -419,9 +430,9 @@ async def submit_user_log_entrance(log: Log, user_id: uuid.UUID):
     given_log_date = log.log_date
     if given_log_date != date.today():
         raise HTTPException(status_code=422, detail="Date should be equal to the current day")
-    if len(target_user.entry_logs) > len(target_user.exit_logs):
+    if target_user.entry_logs[-1].time > target_user.exit_logs[-1].time:
         raise HTTPException(status_code=422, detail="Your last entry log doesn't have a matching exit log")
-    pending_log = LogOutput(log_date=given_log_date, time=log_time, comment=log.comment, id=uuid.uuid4(), is_approved=True)
+    pending_log = LogOutput(log_date=given_log_date, time=log_time, comment=log.comment, id=uuid.uuid4(), is_overtime=False, approved_overtime="00:00")
     for shift in user_shifts:
         days = list()
         if shift.type == "1":
@@ -436,17 +447,11 @@ async def submit_user_log_entrance(log: Log, user_id: uuid.UUID):
         if given_log_date.today().weekday()+1 in days or shift.date == given_log_date:
 
             if timedelta(hours=log_time.hour, minutes=log_time.minute) < (timedelta(hours=shift.start.hour, minutes=shift.start.minute) - timedelta(hours=shift.flex_time.hour, minutes=shift.flex_time.minute)):
-                pending_log.is_approved = False
+                pending_log.is_overtime = True
                 target_user.entry_logs.append(pending_log)
                 return pending_log
             elif timedelta(hours=log_time.hour, minutes=log_time.minute) > (timedelta(hours=shift.start.hour, minutes=shift.start.minute) + timedelta(hours=shift.permit_time.hour, minutes=shift.permit_time.minute)):
-                pending_log.is_approved = False
-                target_user.entry_logs.append(pending_log)
-                return pending_log
-            # elif (timedelta(hours=shift.end.hour, minutes=shift.end.minute) - timedelta(hours=shift.flex_time.hour, minutes=shift.flex_time.minute)) > timedelta(hours=log_time.hour, minutes=log_time.minute) > (timedelta(hours=shift.start.hour, minutes=shift.start.minute) + timedelta(hours=shift.flex_time.hour, minutes=shift.flex_time.minute)):
-                # pending_log.is_approved = False
-                # user.logs.append(pending_log)
-                # return {"msg": "Your log is submitted at unusual time so your log remains unapproved until admin inspection", "log added": pending_log}
+                raise HTTPException(status_code=409, detail="Permit time for entrance is over!")
             else:
                 target_user.entry_logs.append(pending_log)
                 return pending_log
@@ -467,9 +472,9 @@ async def submit_user_log_exit(user_id: uuid.UUID, log: Log):
     given_log_date = log.log_date
     if given_log_date != date.today():
         raise HTTPException(status_code=422, detail="Date should be equal to the current day")
-    if len(target_user.entry_logs) < len(target_user.exit_logs):
+    if target_user.entry_logs[-1].time < target_user.exit_logs[-1].time:
         raise HTTPException(status_code=422, detail="Your last exit log doesn't have a matching entry log")
-    pending_log = LogOutput(log_date=given_log_date, time=log_time, comment=log.comment, id=uuid.uuid4(), is_approved=True)
+    pending_log = LogOutput(log_date=given_log_date, time=log_time, comment=log.comment, id=uuid.uuid4(), is_overtime=False, approved_overtime="00:00")
     for shift in user_shifts:
         days = list()
         if shift.type == "1":
@@ -482,22 +487,12 @@ async def submit_user_log_exit(user_id: uuid.UUID, log: Log):
         if len(same_date_logs) != 0:
             continue
         if given_log_date.today().weekday()+1 in days or shift.date == given_log_date:
-            if timedelta(hours=log_time.hour, minutes=log_time.minute) < (
-                    timedelta(hours=shift.end.hour, minutes=shift.end.minute) - timedelta(
-                    hours=shift.flex_time.hour, minutes=shift.flex_time.minute)):
-                pending_log.is_approved = False
-                target_user.exit_logs.append(pending_log)
-                return pending_log
-            elif timedelta(hours=log_time.hour, minutes=log_time.minute) > (
+            if timedelta(hours=log_time.hour, minutes=log_time.minute) > (
                     timedelta(hours=shift.end.hour, minutes=shift.end.minute) + timedelta(hours=shift.flex_time.hour,
                                                                                           minutes=shift.flex_time.minute)):
-                pending_log.is_approved = False
+                pending_log.is_overtime = True
                 target_user.exit_logs.append(pending_log)
                 return pending_log
-            # elif (timedelta(hours=shift.end.hour, minutes=shift.end.minute) - timedelta(hours=shift.flex_time.hour, minutes=shift.flex_time.minute)) > timedelta(hours=log_time.hour, minutes=log_time.minute) > (timedelta(hours=shift.start.hour, minutes=shift.start.minute) + timedelta(hours=shift.flex_time.hour, minutes=shift.flex_time.minute)):
-            # pending_log.is_approved = False
-            # user.logs.append(pending_log)
-            # return {"msg": "Your log is submitted at unusual time so your log remains unapproved until admin inspection", "log added": pending_log}
             else:
                 target_user.exit_logs.append(pending_log)
                 return pending_log
@@ -555,7 +550,7 @@ def patch_user_log(user_id: uuid.UUID, log_id: uuid.UUID, date: date, time: time
     return log
 
 
-@router.get("/users/daily", response_model=list[DailyWork], tags=["Calculate"])
+@router.get("/users/daily", response_model=bool, tags=["Calculate"])
 async def calculate_daily_work(user_id: uuid.UUID, start: date, end: date):
     target_user = None
     for user in users:
@@ -568,30 +563,21 @@ async def calculate_daily_work(user_id: uuid.UUID, start: date, end: date):
             raise HTTPException(status_code=409, detail=f"Date {date} is a holiday!")
     user_entry_logs = []
     for log in target_user.entry_logs:
-        if log.is_approved and log.log_date >= start <= end:
+        if log.log_date >= start <= end:
             user_entry_logs.append(log)
     user_exit_logs = []
     for log in target_user.exit_logs:
-        if log.is_approved and log.log_date >= start <= end:
+        if log.log_date >= start <= end:
             user_exit_logs.append(log)
 
-    if len(user_entry_logs) == len(user_exit_logs) == 0:
-        raise HTTPException(status_code=404, detail="User doesn't have any shift on this date or their log hasn't been approved!")
-
-    if len(user_entry_logs) != len(user_exit_logs):
-        raise HTTPException(status_code=422, detail="User's entry logs and exit logs are not equal")
-    daily_work = []
-    for i in range(len(user_entry_logs)):
-        if user_entry_logs[i].log_date == user_exit_logs[i].log_date:
-            hours = (timedelta(hours=user_exit_logs[i].time.hour, minutes=user_exit_logs[i].time.minute)
-                     - timedelta(hours=user_entry_logs[i].time.hour,minutes=user_entry_logs[i].time.minute))
-
-            daily_work.append(DailyWork(date=user_entry_logs[i].log_date, hours=format_timespan(hours)))
-    return daily_work
+    if len(user_entry_logs) == 0 and len(user_exit_logs) == 0:
+        return False
+    else:
+        return True
 
 
 @router.get("/users/overtime", response_model=list[DailyWork], tags=["Calculate"])
-def get_user_overtime(user_id: uuid.UUID, start: date, end: date):
+def get_user_overtime(user_id: uuid.UUID, start: date, end: date, approval: bool):
     target_user = None
     for user in users:
         if user_id == user.id:
@@ -603,11 +589,11 @@ def get_user_overtime(user_id: uuid.UUID, start: date, end: date):
             raise HTTPException(status_code=409, detail=f"Date {date} is a holiday!")
     user_entry_logs = []
     for log in target_user.entry_logs:
-        if log.is_approved and log.log_date >= start <= end:
+        if log.is_overtime and log.log_date >= start <= end:
             user_entry_logs.append(log)
     user_exit_logs = []
     for log in target_user.exit_logs:
-        if log.is_approved and log.log_date >= start <= end:
+        if log.is_overtime and log.log_date >= start <= end:
             user_exit_logs.append(log)
 
     if len(user_entry_logs) == len(user_exit_logs) == 0:
@@ -620,7 +606,6 @@ def get_user_overtime(user_id: uuid.UUID, start: date, end: date):
     user_shifts = target_user.shifts
     for i in range(len(user_entry_logs)):
         if user_entry_logs[i].log_date == user_exit_logs[i].log_date:
-            shift_time = time(hour=5)
             for shift in user_shifts:
                 if user_entry_logs[i].time < shift.end and not user_exit_logs[i].time < shift.start:
                     days = list()
@@ -631,9 +616,13 @@ def get_user_overtime(user_id: uuid.UUID, start: date, end: date):
                         hours = (timedelta(hours=user_exit_logs[i].time.hour, minutes=user_exit_logs[i].time.minute)
                                 - timedelta(hours=user_entry_logs[i].time.hour, minutes=user_entry_logs[i].time.minute))
                         shift_hours = (timedelta(hours=shift.end.hour, minutes=shift.end.minute)
-                                - timedelta(hours=shift.start.hour, minutes=shift.start.minute)) + timedelta(minutes=15)
+                                - timedelta(hours=shift.start.hour, minutes=shift.start.minute))
                         if hours > shift_hours:
-                            daily_work.append(DailyWork(date=user_entry_logs[i].log_date, hours=format_timespan(hours)))
+                            if approval is False:
+                                daily_work.append(DailyWork(date=user_entry_logs[i].log_date, hours=format_timespan(hours-shift_hours)))
+                            else:
+                                daily_work.append(DailyWork(date=user_entry_logs[i].log_date, hours=format_timespan(user_exit_logs)))
+
     return daily_work
 
 
@@ -647,11 +636,11 @@ def get_user_undertime(user_id: uuid.UUID, start: date, end: date):
         raise HTTPException(status_code=404, detail=f"User with id={user_id} doesn't exist!")
     user_entry_logs = []
     for log in target_user.entry_logs:
-        if log.is_approved and log.log_date >= start <= end:
+        if log.log_date >= start <= end:
             user_entry_logs.append(log)
     user_exit_logs = []
     for log in target_user.exit_logs:
-        if log.is_approved and log.log_date >= start <= end:
+        if log.log_date >= start <= end:
             user_exit_logs.append(log)
 
     if len(user_entry_logs) == len(user_exit_logs) == 0:
@@ -676,10 +665,9 @@ def get_user_undertime(user_id: uuid.UUID, start: date, end: date):
                                  - timedelta(hours=user_entry_logs[i].time.hour,
                                              minutes=user_entry_logs[i].time.minute))
                         shift_hours = (timedelta(hours=shift.end.hour, minutes=shift.end.minute)
-                                       - timedelta(hours=shift.start.hour, minutes=shift.start.minute)) - timedelta(
-                            minutes=15)
+                                       - timedelta(hours=shift.start.hour, minutes=shift.start.minute))
                         if hours < shift_hours:
-                            daily_work.append(DailyWork(date=user_entry_logs[i].log_date, hours=format_timespan(hours)))
+                            daily_work.append(DailyWork(date=user_entry_logs[i].log_date, hours=format_timespan(shift_hours-hours)))
     return daily_work
 
 
