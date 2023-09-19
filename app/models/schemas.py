@@ -27,20 +27,20 @@ class Shift(BaseModel):
     days: Optional[list[Day]]
     type: Type
     date: Optional[date]
-    start: time
-    end: time
-    flex_time: time = Field(default="00:00")
+    start_time: time
+    end_time: time
+    flex_time: time
     permit_time: time
     created_at: datetime = datetime.now()
 
 
 class ShiftType1(BaseModel):
-    name: str
-    start: time = Field(default="09:00")
-    end: time = Field(default="18:00")
-    flex_time: time = Field(default="00:00")
-    days:  List[Day]
-    permit_time: time = Field(default="04:00")
+    name: str = Field(description="Shift name")
+    start: time = Field(description="Start time")
+    end: time = Field(description="End time")
+    flex_time: time = Field(description="Flex time")
+    days:  List[Day] = Field(description="Days of the week")
+    permit_time: time = Field(description="Permit time")
 
 
 class ShiftType1Output(ShiftType1):
@@ -49,12 +49,12 @@ class ShiftType1Output(ShiftType1):
 
 
 class ShiftType2(BaseModel):
-    name: str
-    start: time = Field(default="09:00")
-    end: time = Field(default="18:00")
-    flex_time: time = Field(default="00:00")
+    name: str = Field(description="Shift name")
+    start: time = Field(description="Start time")
+    end: time = Field(description="End time")
+    flex_time: time = Field(description="Flex time")
     date: date
-    permit_time: time = Field(default="04:00")
+    permit_time: time = Field(description="Permit time")
 
 
 class ShiftType2Output(ShiftType2):
@@ -63,22 +63,25 @@ class ShiftType2Output(ShiftType2):
 
 
 class Log(BaseModel):
-    log_date: Optional[date]
+    date: Optional[date]
     time: time
     comment: Optional[str]
 
 
 class LogOutput(Log):
     id: UUID
+    user_id: UUID
     is_overtime: bool
     approved_overtime: time
+    type: str
 
 
 class Event(BaseModel):
+    name: str = Field(description="Event name")
     date: date
-    start: time
-    end: time
-    attendees: list[UUID]
+    start: time = Field(description="Event start time")
+    end: time = Field(description="Event end time")
+    attendees: list[UUID] = Field(description="Event attendees")
 
 
 class EventOutput(Event):

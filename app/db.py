@@ -11,12 +11,14 @@ load_dotenv()
 log = logging.getLogger("uvicorn")
 database_url = os.environ.get("DATABASE_URL")
 print(database_url)
-engine = create_engine(database_url, pool_pre_ping=True)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+engine = create_engine(database_url, future=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine, future=True)
 Base = declarative_base()
-""""
-def init_db(app: FastAPI):
-    
-   
-"""
 
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
