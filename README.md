@@ -33,7 +33,7 @@ After it's done (it might take few minutes), run this command:
     docker-compose up -d
     
 You should see that the two containers are running(You can check if they are running via docker desktop too).
-FastAPI provides you a client to test API requests in your project: <a href="http://127.0.0.1:8004/docs#/">`http://127.0.0.1:8000/docs#/`
+FastAPI provides you a client to test API requests in your project: <a href="http://127.0.0.1:8004/docs#/">`http://127.0.0.1:8004/docs#/`
 
 if it's not working run the above command again.
 
