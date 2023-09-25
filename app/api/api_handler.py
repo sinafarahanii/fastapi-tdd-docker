@@ -1,39 +1,29 @@
 import datetime
 
-import sqlalchemy.exc
+
 from humanfriendly import format_timespan
 import uuid
 from typing import List, Annotated
 from sqlalchemy.orm import Session, defer
+from sqlalchemy.sql import func
 from app.db import SessionLocal, engine, get_db
 from fastapi import APIRouter, Path, Query, Request, middleware, HTTPException, Body, Depends
 from app.models import models
 from fastapi.responses import RedirectResponse
-from app.models.schemas import Shift, User, Type, Day, Holiday, Log, LogOutput, ShiftType1, ShiftType2, DailyWork, ShiftType1Output, ShiftType2Output, Event, EventOutput
+from app.models.schemas import Shift, Type, Day, Holiday, Log, LogOutput, ShiftType1, ShiftType2, DailyWork, ShiftType1Output, ShiftType2Output, Event, EventOutput, UserShift
 from datetime import date, time, timedelta
 from ortools.sat.python import cp_model
+from dateutil.rrule import rrule, DAILY
 import pandas
 
 models.Base.metadata.create_all(bind=engine)
 router = APIRouter()
 
-events = []
-
-users = [
-     User(id=uuid.uuid4(), shifts=[], entry_logs=[], exit_logs=[])
-]
-
-shifts = [Shift(name="shift", type="1", start_time="09:00", end_time="18:00", flex_time="01:00", days=[Day.MONDAY, Day.TUESDAY, Day.WEDNESDAY, Day.THURSDAY, Day.FRIDAY, Day.SATURDAY, Day.SUNDAY], id=uuid.uuid4(), date=None, permit_time="04:00"),
-          Shift(name="shift", type="2", start_time="12:00", end_time="15:00", flex_time="00:30", days=None, id=uuid.uuid4(), date="2023-10-10", permit_time="04:00"),
-          Shift(name="shift", type="2", start_time="13:00", end_time="16:00", flex_time="00:30", days=None, id=uuid.uuid4(), date="2023-10-10", permit_time="04:00"),
-          Shift(name="shift", type="1", start_time="11:00", end_time="19:00", flex_time="01:00", days=[Day.MONDAY, Day.TUESDAY, Day.WEDNESDAY], id=uuid.uuid4(), date=None, permit_time="04:00")]
-
 
 @router.post("/holidays", response_model=List[Holiday], tags=["Holidays"], status_code=201)
-async def create_holidays(holiday_list: List[Annotated[Holiday, Body(examples=[{"name": "christmas", "date": "2024-01-01"}])]], db: Session = Depends(get_db)):
-    holidays = db.query(models.Holiday).all()
+async def create_holidays(holiday_list: List[Holiday], db: Session = Depends(get_db)):
     for h in holiday_list:
-        holiday = models.Holiday(date=h.date, name=h.name)
+        holiday = models.Holiday(date=h.date, name=h.name, created_by=uuid.uuid4())
         try:
             db.add(holiday)
             db.commit()
@@ -44,16 +34,16 @@ async def create_holidays(holiday_list: List[Annotated[Holiday, Body(examples=[{
 
 
 @router.get("/holidays", response_model=list[Holiday], tags=["Holidays"])
-async def get_holidays(start: date = Query(None, title="start date"), end: date = Query(None, title="end date"), db: Session = Depends(get_db)):
-    if start is None and end is None:
-        raise HTTPException(status_code=400, detail="No parameter provided!")
-    if start is None:
-        start = end
-    if end is None:
+async def get_holidays(start: date = Query(None, title="start date"), end: date = Query(None, title="end date"), specific_date: date = Query(None), db: Session = Depends(get_db)):
+    if specific_date is not None:
+        start = specific_date
         end = start
-    if end < start:
+    if start is None:
+        start = db.query(func.min(models.Holiday.date)).filter().scalar()
+    if end is None:
+        end = db.query(func.max(models.Holiday.date)).filter().scalar()
+    if start > end:
         raise HTTPException(status_code=422, detail="End date can't be before start date!")
-    output_holidays = []
     holidays = db.query(models.Holiday).filter(models.Holiday.date >= start, models.Holiday.date <= end)
     return holidays
 
@@ -174,8 +164,14 @@ async def update_shift_type2(shift_id: uuid.UUID, start_time: time = Query(None)
 
 
 @router.get("/userShifts", response_model=list[Shift], tags=["UserShifts"])
-def get_user_shifts(user_id: uuid.UUID, db: Session = Depends(get_db)):
-    target_user_shifts = db.query(models.UserShift).filter(models.UserShift.user_id == user_id)
+def get_user_shifts(user_id: uuid.UUID, start: date = Query(None), end: date = Query(None), db: Session = Depends(get_db)):
+    if start is None:
+        start = date.min
+    if end is None:
+        end = date.max
+    if start > end:
+        raise HTTPException(status_code=422, detail="Start can't be after end")
+    target_user_shifts = db.query(models.UserShift).filter(models.UserShift.user_id == user_id, models.UserShift.activation >= start, models.UserShift.expiration <= end)
     output = []
     for user_shift in target_user_shifts:
         output.append(db.query(models.WorkShift).get(user_shift.shift_id))
@@ -185,32 +181,11 @@ def get_user_shifts(user_id: uuid.UUID, db: Session = Depends(get_db)):
 
 
 @router.post("/workShifts/type1", response_model=ShiftType1Output, tags=["WorkShifts"], status_code=201)
-async def create_shift_type1(
-        shift: Annotated[
-            ShiftType1,
-            Body(
-                examples=[
-                    {
-                        "name": "daily shift",
-                        "start": "09:00",
-                        "end": "18:00",
-                        "flex_time": "01:00",
-                        "permit_time": "04:00",
-                        "days": [
-                            "1",
-                            "2",
-                            "3",
-                            "4",
-                            "5"
-                        ],
-                    }
-                ]
-            )
-        ], db: Session = Depends(get_db)):
+async def create_shift_type1(shift: ShiftType1, db: Session = Depends(get_db)):
     if shift.end < shift.start:
         raise HTTPException(status_code=422, detail="end time can't be before start time")
     id = uuid.uuid4()
-    pending_shift = models.WorkShift(name=shift.name, days=shift.days, type=Type.one, start_time=shift.start, flex_time=shift.flex_time, permit_time=shift.permit_time, end_time=shift.end, date=None, id=id)
+    pending_shift = models.WorkShift(name=shift.name, days=shift.days, type=Type.one, start_time=shift.start, flex_time=shift.flex_time, permit_time=shift.permit_time, end_time=shift.end, date=None, id=id, created_by=uuid.uuid4())
     output_shift = ShiftType1Output(name=shift.name, days=shift.days, type=Type.one, start=shift.start, flex_time=shift.flex_time, permit_time=shift.permit_time, end=shift.end, id=id)
     db.add(pending_shift)
     db.commit()
@@ -218,44 +193,44 @@ async def create_shift_type1(
 
 
 @router.post("/workShifts/type2", response_model=ShiftType2Output, tags=["WorkShifts"], status_code=201)
-async def create_shift_type2(
-        shift: Annotated[
-            ShiftType2,
-            Body(
-                examples=[
-                    {
-                        "name": "night shift",
-                        "start": "19:00",
-                        "end": "21:00",
-                        "date": "2023-09-25",
-                        "flex_time": "00:15",
-                        "permit_time": "01:00",
-                    }
-                ]
-            )
-        ], db: Session = Depends(get_db)):
+async def create_shift_type2(shift: ShiftType2, db: Session = Depends(get_db)):
     if shift.date < date.today():
         raise HTTPException(status_code=422, detail="Shift date can't be in the past")
     if shift.end < shift.start:
         raise HTTPException(status_code=422, detail="end time can't be before start time")
     id = uuid.uuid4()
-    pending_shift = models.WorkShift(name=shift.name, days=None, type=Type.two, start_time=shift.start, flex_time=shift.flex_time,  permit_time=shift.permit_time, end_time=shift.end, date=shift.date, id=id)
+    pending_shift = models.WorkShift(name=shift.name, days=None, type=Type.two, start_time=shift.start, flex_time=shift.flex_time,  permit_time=shift.permit_time, end_time=shift.end, date=shift.date, id=id, created_by=uuid.uuid4())
     output_shift = ShiftType2Output(name=shift.name, date=shift.date, type=Type.one, start=shift.start, flex_time=shift.flex_time, permit_time=shift.permit_time, end=shift.end, id=id)
     db.add(pending_shift)
     db.commit()
     return output_shift
 
 
+@router.patch("/userShifts", response_model=UserShift, tags=["UserShifts"])
+async def patch_user_shift(user_id: uuid.UUID, shift_id: uuid.UUID, is_expired: bool = Query(None), activation: date = Query(None), expiration: date = Query(None),  db: Session = Depends(get_db)):
+    user_shift = db.query(models.UserShift).filter(models.UserShift.user_id == user_id, models.UserShift.shift_id == shift_id).first()
+    if all(info is None for info in (is_expired, activation, expiration)):
+        raise HTTPException(status_code=400, detail="No parameter provided for update")
+    if is_expired is not None:
+        user_shift.is_expired = is_expired
+    if activation is not None:
+        user_shift.activation = activation
+    if expiration is not None:
+        user_shift.expiration = expiration
+    db.commit()
+    return user_shift
+
+
 @router.post("/userShifts", response_model=Shift, tags=["UserShifts"], status_code=201)
-async def add_user_shift(user_id: uuid.UUID, shift_id: uuid.UUID, db: Session = Depends(get_db)):
-    target_user_shifts = db.query(models.UserShift).filter(models.UserShift.user_id == user_id)
+async def add_user_shift(user_id: uuid.UUID, shift_id: uuid.UUID, activation: date, expiration: date = Query(None), db: Session = Depends(get_db)):
+    target_user_shifts = db.query(models.UserShift).filter(models.UserShift.user_id == user_id, models.UserShift.is_expired == False)
     user_shifts = []
     for user_shift in target_user_shifts:
         user_shifts.append(db.query(models.WorkShift).get(user_shift.shift_id))
     if target_user_shifts is None:
         raise HTTPException(status_code=404, detail=f"User with id={user_id} doesn't exist!")
     pending_shift = db.query(models.WorkShift).get(shift_id)
-    pending_user_shift = models.UserShift(user_id=user_id, shift_id=shift_id)
+    pending_user_shift = models.UserShift(user_id=user_id, shift_id=shift_id, activation=activation, expiration=expiration, created_by=uuid.uuid4())
     if not pending_shift:
         raise HTTPException(status_code=404, detail=f"Shift with id={shift_id} doesn't exist!")
     model = cp_model.CpModel()
@@ -306,7 +281,7 @@ async def add_user_shift(user_id: uuid.UUID, shift_id: uuid.UUID, db: Session = 
             if pending_shift.type == "1":
                 days = list()
                 for day in pending_shift.days:
-                    days.append(int(day.value))
+                    days.append(int(day))
                 if shift.date.today().weekday()+1 in days:
                     local_overlap_check = list()
                     local_model = cp_model.CpModel()
@@ -319,7 +294,7 @@ async def add_user_shift(user_id: uuid.UUID, shift_id: uuid.UUID, db: Session = 
                     local_model.AddNoOverlap(local_overlap_check)
                     status = local_solver.Solve(model=local_model)
                     if status != cp_model.OPTIMAL and status != cp_model.FEASIBLE:
-                        deleted_user_shift = models.UserShift(user_id=user_id, shift_id=shift.id)
+                        deleted_user_shift = db.query(models.UserShift).filter(models.UserShift.user_id == user_id, models.UserShift.shift_id == shift.id).first()
                         db.delete(deleted_user_shift)
                         db.commit()
                         db.add(pending_user_shift)
@@ -337,28 +312,14 @@ async def add_user_shift(user_id: uuid.UUID, shift_id: uuid.UUID, db: Session = 
 
 
 @router.post("/events", response_model=EventOutput, tags=["Events"], status_code=201)
-async def create_event(event: Annotated[
-    Event,
-    Body(
-        examples=[
-            {
-                "name": "Anniversary meeting",
-                "date": "2023-10-10",
-                "start": "16:00",
-                "end": "18:00",
-                "attendees": [
-                    "3fa85f64-5717-4562-b3fc-2c963f66afa6"
-                ]
-            }
-        ]
-    )], db: Session = Depends(get_db)):
+async def create_event(event: Event, db: Session = Depends(get_db)):
     holiday = db.query(models.Holiday).get(event.date)
     if holiday:
         raise HTTPException(status_code=409, detail=f"{event.date} is a holiday!")
     if event.start > event.end:
         raise HTTPException(status_code=422, detail="End time can't be before start time.")
     id = uuid.uuid4()
-    pending_event = models.Event(name=event.name, date=event.date, start=event.start, end=event.end, attendees=event.attendees, id=id)
+    pending_event = models.Event(name=event.name, date=event.date, start=event.start, end=event.end, attendees=event.attendees, id=id, created_by=uuid.uuid4())
     db.add(pending_event)
     db.commit()
     for user_id in event.attendees:
@@ -416,8 +377,20 @@ async def patch_event(event_id: uuid.UUID, attendees: list[uuid.UUID], date: dat
 
 
 @router.get("/users/logs", response_model=list[LogOutput], tags=["Logs"])
-async def get_user_logs(user_id: uuid.UUID, db: Session = Depends(get_db)):
-    return db.query(models.Log).filter(models.Log.user_id == user_id)
+async def get_user_logs(user_id: uuid.UUID, start: date = Query(None), end: date = Query(None), specific_date: date = Query(None), db: Session = Depends(get_db)):
+    if specific_date is not None:
+        start = specific_date
+        end = start
+    if start is None:
+        start = date.min
+    if end is None:
+        end = date.max
+    if start > end:
+        raise HTTPException(status_code=422, detail="End date can't be before start day")
+    if specific_date is not None:
+        return db.query(models.Log).filter(models.Log.user_id == user_id, models.Log.date == specific_date)
+    else:
+        return db.query(models.Log).filter(models.Log.user_id == user_id, models.Log.date >= start, models.Log.date <= end)
 
 
 @router.delete("/users/logs", tags=["Logs"], status_code=204)
@@ -431,18 +404,8 @@ async def delete_user_logs(log_id: uuid.UUID, db: Session = Depends(get_db)):
 
 
 @router.post("/users/logs/entrance", response_model=LogOutput, tags=["Logs"], status_code=201)
-async def submit_user_log_entrance(log: Annotated[
-    Log,
-    Body(
-        examples=[
-            {
-                "date": str(date.today()),
-                "time": "09:00",
-                "comment": "i'm in"
-            }
-        ]
-    )], user_id: uuid.UUID, db: Session = Depends(get_db)):
-    target_user_shifts = db.query(models.UserShift).filter(models.UserShift.user_id == user_id)
+async def submit_user_log_entrance(log: Log, user_id: uuid.UUID, db: Session = Depends(get_db)):
+    target_user_shifts = db.query(models.UserShift).filter(models.UserShift.user_id == user_id, models.UserShift.is_expired == False)
     if not target_user_shifts:
         raise HTTPException(status_code=404, detail=f"User with id={user_id} doesn't exist")
     user_shifts = []
@@ -450,14 +413,14 @@ async def submit_user_log_entrance(log: Annotated[
         user_shifts.append(db.query(models.WorkShift).get(user_shift.shift_id))
     log_time = log.time
     given_log_date = log.date
-    entry_logs = list(db.query(models.Log).filter(models.Log.user_id == user_id, models.Log.type == "entrance", models.Log.date == date.today()))
-    exit_logs = list(db.query(models.Log).filter(models.Log.user_id == user_id, models.Log.type == "exit", models.Log.date == date.today()))
+    entry_logs = list(db.query(models.Log).filter(models.Log.user_id == user_id, models.Log.type == "entrance", models.Log.date == given_log_date))
+    exit_logs = list(db.query(models.Log).filter(models.Log.user_id == user_id, models.Log.type == "exit", models.Log.date == given_log_date))
     if given_log_date != date.today():
         raise HTTPException(status_code=422, detail="Date should be equal to the current day")
     if len(entry_logs) > len(exit_logs):
         raise HTTPException(status_code=422, detail="Your last entry log doesn't have a matching exit log")
     id= uuid.uuid4()
-    pending_log = models.Log(date=given_log_date, time=log_time, comment=log.comment, id=id, is_overtime=False, approved_overtime="00:00", type="entrance", user_id=user_id)
+    pending_log = models.Log(date=given_log_date, time=log_time, comment=log.comment, id=id, is_overtime=False, approved_overtime="00:00", type="entrance", user_id=user_id, created_by=uuid.uuid4())
     for shift in user_shifts:
         days = list()
         if shift.type == "1":
@@ -465,7 +428,7 @@ async def submit_user_log_entrance(log: Annotated[
                 days.append(int(day))
         same_date_logs = []
         for exit_log in exit_logs:
-            if exit_log.log_date == given_log_date and exit_log.time > shift.start:
+            if exit_log.date == given_log_date and exit_log.time > shift.start_time:
                 same_date_logs.append(exit_log)
         if len(same_date_logs) != 0:
             continue
@@ -487,28 +450,42 @@ async def submit_user_log_entrance(log: Annotated[
 
 
 @router.get("/users/logs/entrance", response_model=list[LogOutput], tags=["Logs"])
-async def get_user_entrance_logs(user_id: uuid.UUID, db: Session = Depends(get_db)):
-    return db.query(models.Log).filter(models.Log.user_id == user_id, models.Log.type == "entrance")
+async def get_user_entrance_logs(user_id: uuid.UUID, start: date = Query(None), end: date = Query(None), specific_date: date = Query(None), db: Session = Depends(get_db)):
+    if specific_date is not None:
+        start = specific_date
+        end = start
+    if start is None:
+        start = date.min
+    if end is None:
+        end = date.max
+    if start > end:
+        raise HTTPException(status_code=422, detail="End date can't be before start day")
+    if specific_date is None:
+        return db.query(models.Log).filter(models.Log.user_id == user_id, models.Log.type == "entrance", models.Log.date >= start, models.Log.date <= end)
+    else:
+        return db.query(models.Log).filter(models.Log.user_id == user_id, models.Log.type == "entrance", models.Log.date == specific_date)
 
 
 @router.get("/users/logs/exit", response_model=list[LogOutput], tags=["Logs"])
-async def get_user_entrance_logs(user_id: uuid.UUID, db: Session = Depends(get_db)):
-    return db.query(models.Log).filter(models.Log.user_id == user_id, models.Log.type == "exit")
+async def get_user_entrance_logs(user_id: uuid.UUID, start: date = Query(None), end: date = Query(None), specific_date: date = Query(None), db: Session = Depends(get_db)):
+    if specific_date is not None:
+        start = specific_date
+        end = start
+    if start is None:
+        start = date.min
+    if end is None:
+        end = date.max
+    if start > end:
+        raise HTTPException(status_code=422, detail="End date can't be before start day")
+    if specific_date is None:
+        return db.query(models.Log).filter(models.Log.user_id == user_id, models.Log.type == "exit", models.Log.date >= start, models.Log.date <= end)
+    else:
+        return db.query(models.Log).filter(models.Log.user_id == user_id, models.Log.type == "exit", models.Log.date == specific_date)
 
 
 @router.post("/users/logs/exit", response_model=LogOutput, tags=["Logs"], status_code=201)
-async def submit_user_log_exit(user_id: uuid.UUID, log: Annotated[
-    Log,
-    Body(
-        examples=[
-            {
-                "date": str(date.today()),
-                "time": "18:00",
-                "comment": "i'm out"
-            }
-        ]
-    )], db: Session = Depends(get_db)):
-    target_user_shifts = db.query(models.UserShift).filter(models.UserShift.user_id == user_id)
+async def submit_user_log_exit(user_id: uuid.UUID, log: Log, db: Session = Depends(get_db)):
+    target_user_shifts = db.query(models.UserShift).filter(models.UserShift.user_id == user_id, models.UserShift.is_expired == False)
     if not target_user_shifts:
         raise HTTPException(status_code=404, detail=f"User with id={user_id} doesn't exist")
     user_shifts = []
@@ -516,14 +493,14 @@ async def submit_user_log_exit(user_id: uuid.UUID, log: Annotated[
         user_shifts.append(db.query(models.WorkShift).get(user_shift.shift_id))
     log_time = log.time
     given_log_date = log.date
-    entry_logs = list(db.query(models.Log).filter(models.Log.user_id == user_id, models.Log.type == "entrance"))
-    exit_logs = list(db.query(models.Log).filter(models.Log.user_id == user_id, models.Log.type == "exit"))
+    entry_logs = list(db.query(models.Log).filter(models.Log.user_id == user_id, models.Log.type == "entrance", models.Log.date == given_log_date))
+    exit_logs = list(db.query(models.Log).filter(models.Log.user_id == user_id, models.Log.type == "exit", models.Log.date == given_log_date))
     if given_log_date != date.today():
         raise HTTPException(status_code=422, detail="Date should be equal to the current day")
     if len(entry_logs) < len(exit_logs):
         raise HTTPException(status_code=422, detail="Your last exit log doesn't have a matching entry log")
     id = uuid.uuid4()
-    pending_log = models.Log(date=given_log_date, time=log_time, comment=log.comment, id=id, is_overtime=False, approved_overtime="00:00", type="exit", user_id=user_id)
+    pending_log = models.Log(date=given_log_date, time=log_time, comment=log.comment, id=id, is_overtime=False, approved_overtime="00:00", type="exit", user_id=user_id, created_by=uuid.uuid4())
     for shift in user_shifts:
         days = list()
         if shift.type == "1":
@@ -531,14 +508,17 @@ async def submit_user_log_exit(user_id: uuid.UUID, log: Annotated[
                 days.append(int(day))
         same_date_logs = []
         for exit_log in exit_logs:
-            if exit_log.log_date == given_log_date and exit_log.time > shift.start:
+            if exit_log.date == given_log_date and exit_log.time > shift.start_time:
                 same_date_logs.append(exit_log)
         if len(same_date_logs) != 0:
             continue
         if given_log_date.today().weekday()+1 in days or shift.date == given_log_date:
-            if timedelta(hours=log_time.hour, minutes=log_time.minute) > (
-                    timedelta(hours=shift.end_time.hour, minutes=shift.end_time.minute) + timedelta(hours=shift.flex_time.hour,
-                                                                                          minutes=shift.flex_time.minute)):
+            last_entry_log = db.query(func.max(models.Log.time)).filter(models.Log.user_id == user_id, models.Log.date == date.today(), models.Log.type == "entrance").scalar()
+            if last_entry_log is None:
+                last_entry_log = log_time
+            if timedelta(hours=log_time.hour, minutes=log_time.minute) - timedelta(hours=last_entry_log.hour, minutes=last_entry_log.minute) > (
+                    timedelta(hours=shift.end_time.hour, minutes=shift.end_time.minute) - timedelta(hours=shift.start_time.hour,
+                                                                                          minutes=shift.start_time.minute)):
                 pending_log.is_overtime = True
                 db.add(pending_log)
                 db.commit()
@@ -593,21 +573,74 @@ def patch_user_log(log_id: uuid.UUID, date: date = Query(None), time: time = Que
     return log
 
 
-@router.get("/users/daily", response_model=bool, tags=["Calculate"])
-async def calculate_daily_work(user_id: uuid.UUID, date: date, db: Session = Depends(get_db)):
-    holiday = db.query(models.Holiday).get(date)
-    if holiday:
-        raise HTTPException(status_code=409, detail=f"Date {date} is a holiday!")
-    user_entry_logs = list(db.query(models.Log).filter(models.Log.user_id == user_id, models.Log.date == date, models.Log.type == "entrance"))
-    user_exit_logs = list(db.query(models.Log).filter(models.Log.user_id == user_id, models.Log.date == date, models.Log.type == "exit"))
-    if len(user_entry_logs) == 0 and len(user_exit_logs) == 0:
-        return False
+@router.get("/users/logs/overtime", response_model=list[LogOutput], tags=["Logs"])
+async def get_user_overtime_log(user_id: uuid.UUID = Query(None), start: date = Query(None), end: date = Query(None), approved_overtime: bool = Query(), specific_date: date = Query(None), db: Session = Depends(get_db)):
+    if specific_date is not None:
+        start = specific_date
+        end = start
+    if start is None:
+        if user_id is not None:
+            start = date.min
+        else:
+            start = db.query(func.min(models.Log.date)).filter().scalar()
+    if end is None:
+        if user_id is not None:
+            end = date.max
+        else:
+            end = db.query(func.max(models.Log.date)).filter().scalar()
+    if start > end:
+        raise HTTPException(status_code=422, detail="End date can't be before start day")
+    if user_id is None:
+        if approved_overtime:
+            return list(db.query(models.Log).filter(models.Log.date >= start, models.Log.date <= end, models.Log.approved_overtime != "00:00", models.Log.is_overtime == True))
+        else:
+            return list(db.query(models.Log).filter(models.Log.date >= start, models.Log.date <= end, models.Log.approved_overtime == "00:00", models.Log.is_overtime == True))
     else:
-        return True
+        if approved_overtime:
+            return list(db.query(models.Log).filter(models.Log.date >= start, models.Log.date <= end, models.Log.approved_overtime != "00:00", models.Log.user_id == user_id, models.Log.is_overtime == True))
+        else:
+            return list(db.query(models.Log).filter(models.Log.date >= start, models.Log.date <= end, models.Log.approved_overtime == "00:00", models.Log.user_id == user_id, models.Log.is_overtime == True))
+
+
+@router.get("/users/daily", response_model=list[DailyWork], tags=["Calculate"])
+async def calculate_daily_work(user_id: uuid.UUID, start: date = Query(None), end: date = Query(None), specific_date: date = Query(None), db: Session = Depends(get_db)):
+    logs = list(db.query(models.Log).filter(models.Log.user_id == user_id))
+    if len(logs) == 0:
+        raise HTTPException(status_code=404, detail=f"User with id={user_id} doesn't have any logs")
+    if specific_date is not None:
+        start = specific_date
+        end = start
+    if start is None:
+        start = db.query(func.min(models.Log.date)).filter(models.Log.user_id == user_id).scalar()
+    if end is None:
+        end = db.query(func.max(models.Log.date)).filter(models.Log.user_id == user_id).scalar()
+    if start > end:
+        raise HTTPException(status_code=422, detail="End date can't be before start day")
+    daily_work_list = []
+    for dt in rrule(DAILY, dtstart=start, until=end):
+        dt = dt.strftime("%Y-%m-%d")
+        log = db.query(models.Log).filter(models.Log.date == dt, models.Log.user_id == user_id).first()
+        if log:
+            daily_work_list.append(DailyWork(date=dt, hours="TRUE"))
+        else:
+            daily_work_list.append(DailyWork(date=dt, hours="FALSE"))
+    return daily_work_list
 
 
 @router.get("/users/overtime", response_model=list[DailyWork], tags=["Calculate"])
-def get_user_overtime(user_id: uuid.UUID, start: date, end: date, approval: bool, db: Session = Depends(get_db)):
+def get_user_overtime(user_id: uuid.UUID, start: date = Query(None), end: date = Query(None), approval: bool = Query(), specific_date: date = Query(None), db: Session = Depends(get_db)):
+    logs = list(db.query(models.Log).filter(models.Log.user_id == user_id))
+    if len(logs) == 0:
+        raise HTTPException(status_code=404, detail=f"User with id={user_id} doesn't have any logs")
+    if specific_date is not None:
+        start = specific_date
+        end = start
+    if start is None:
+        start = db.query(func.min(models.Log.date)).filter(models.Log.user_id == user_id).scalar()
+    if end is None:
+        end = db.query(func.max(models.Log.date)).filter(models.Log.user_id == user_id).scalar()
+    if start > end:
+        raise HTTPException(status_code=422, detail="End date can't be before start day")
     user_entry_logs = list(
         db.query(models.Log).filter(models.Log.user_id == user_id, models.Log.date >= start,
                                     models.Log.type == "entrance", models.Log.date <= end))
@@ -620,7 +653,7 @@ def get_user_overtime(user_id: uuid.UUID, start: date, end: date, approval: bool
     if len(user_entry_logs) != len(user_exit_logs):
         raise HTTPException(status_code=422, detail="User's entry logs and exit logs are not equal")
     daily_work = []
-    target_user_shifts = db.query(models.UserShift).filter(models.UserShift.user_id == user_id)
+    target_user_shifts = db.query(models.UserShift).filter(models.UserShift.user_id == user_id, models.UserShift.activation >= start, models.UserShift.expiration <= end)
     if not target_user_shifts:
         raise HTTPException(status_code=404, detail=f"User with id={user_id} doesn't exist")
     user_shifts = []
@@ -629,7 +662,9 @@ def get_user_overtime(user_id: uuid.UUID, start: date, end: date, approval: bool
     for i in range(len(user_entry_logs)):
         if user_entry_logs[i].date == user_exit_logs[i].date:
             for shift in user_shifts:
-                if user_entry_logs[i].time < shift.end_time and not user_exit_logs[i].time < shift.start_time:
+                shift_activation = db.query(models.UserShift.activation).filter(models.UserShift.user_id == user_id, models.UserShift.shift_id == shift.id).scalar()
+                shift_expiration = db.query(models.UserShift.expiration).filter(models.UserShift.user_id == user_id, models.UserShift.shift_id == shift.id).scalar()
+                if user_entry_logs[i].time < shift.end_time and not user_exit_logs[i].time < shift.start_time and user_entry_logs[i].date > shift_activation and user_entry_logs[i].date < shift_expiration:
                     days = list()
                     if shift.type == "1":
                         for day in shift.days:
@@ -649,7 +684,19 @@ def get_user_overtime(user_id: uuid.UUID, start: date, end: date, approval: bool
 
 
 @router.get("/users/undertime", response_model=list[DailyWork], tags=["Calculate"])
-def get_user_undertime(user_id: uuid.UUID, start: date, end: date, db: Session = Depends(get_db)):
+def get_user_undertime(user_id: uuid.UUID, start: date = Query(None), end: date = Query(None), specific_date: date = Query(None), db: Session = Depends(get_db)):
+    logs = list(db.query(models.Log).filter(models.Log.user_id == user_id))
+    if len(logs) == 0:
+        raise HTTPException(status_code=404, detail=f"User with id={user_id} doesn't have any logs")
+    if specific_date is not None:
+        start = specific_date
+        end = start
+    if start is None:
+        start = db.query(func.min(models.Log.date)).filter(models.Log.user_id == user_id).scalar()
+    if end is None:
+        end = db.query(func.max(models.Log.date)).filter(models.Log.user_id == user_id).scalar()
+    if start > end:
+        raise HTTPException(status_code=422, detail="End date can't be before start day")
     user_entry_logs = list(
         db.query(models.Log).filter(models.Log.user_id == user_id, models.Log.date >= start,
                                     models.Log.type == "entrance", models.Log.date <= end))
@@ -671,7 +718,9 @@ def get_user_undertime(user_id: uuid.UUID, start: date, end: date, db: Session =
     for i in range(len(user_entry_logs)):
         if user_entry_logs[i].date == user_exit_logs[i].date:
             for shift in user_shifts:
-                if user_entry_logs[i].time < shift.end_time and not user_exit_logs[i].time < shift.start_time:
+                shift_activation = db.query(models.UserShift.activation).filter(models.UserShift.user_id == user_id, models.UserShift.shift_id == shift.id).scalar()
+                shift_expiration = db.query(models.UserShift.expiration).filter(models.UserShift.user_id == user_id, models.UserShift.shift_id == shift.id).scalar()
+                if user_entry_logs[i].time < shift.end_time and not user_exit_logs[i].time < shift.start_time and user_entry_logs[i].date > shift_activation and user_entry_logs[i].date < shift_expiration:
                     days = list()
                     if shift.type == "1":
                         for day in shift.days:
@@ -684,7 +733,7 @@ def get_user_undertime(user_id: uuid.UUID, start: date, end: date, db: Session =
                                        - timedelta(hours=shift.start_time.hour, minutes=shift.start_time.minute))
                         if hours < shift_hours:
                                 daily_work.append(
-                                    DailyWork(date=user_entry_logs[i].date, hours=format_timespan(hours - shift_hours)))
+                                    DailyWork(date=user_entry_logs[i].date, hours=format_timespan(shift_hours - hours)))
 
     return daily_work
 

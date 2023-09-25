@@ -1,7 +1,12 @@
+sqlalchemy
 fastapi
 uvicorn
 pydantic-settings
 asyncpg
-aerich
 pytest
 httpx
+ortools
+humanfriendly
+pandas
+psycopg2-binary
+SQLAlchemy-Utc
