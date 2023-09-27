@@ -15,7 +15,7 @@ In order to use pip commands, you can make a virtual environment in your directo
     
 then activate it by running: (on Linux)
 
-    source venv\bin\activate
+    source venv/bin/activate
     
 Required packages are mentioned in `requriements.txt`.
 
